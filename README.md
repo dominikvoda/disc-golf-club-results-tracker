@@ -1,46 +1,42 @@
 # Disc Golf Club Results Tracker
 
-Bash script that syncs club member tournament results from [iDiscGolf](https://www.idiscgolf.eu) into a Google Sheet.
+Python script that syncs club member tournament results from [iDiscGolf](https://idiscgolf.cz) into a Google Sheet.
 
 ## How it works
 
-1. Reads club members from a Google Sheet tab ("Members")
-2. Looks up each member's recent tournaments on iDiscGolf
-3. Writes results to a separate tab in the same sheet ("Results")
-4. Tracks last sync time to only fetch new data (with configurable overlap threshold)
+1. Reads tracked leagues from the sheet and scrapes their tournament pages
+2. For each tournament in the time window, calls the iDiscGolf API for results
+3. Matches results against club members, computes placement per division
+4. Writes results to the "Účast" tab with finalization status, week number, etc.
+5. Tracks last sync time to only fetch new data (with configurable threshold)
 
 ## Prerequisites
 
-- `bash` 4+
-- `curl`
-- `jq`
-- `openssl`
-- `python3`
+- Python 3.10+
 - A Google Cloud service account with Sheets API enabled
 - The Google Sheet must be shared with the service account email
+- An iDiscGolf API token
 
 ## Setup
 
-1. Clone the repo:
-   ```bash
-   git clone git@github.com:dominikvoda/disc-golf-club-results-tracker.git
-   cd disc-golf-club-results-tracker
-   ```
+```bash
+git clone git@github.com:dominikvoda/disc-golf-club-results-tracker.git
+cd disc-golf-club-results-tracker
 
-2. Copy and configure the environment file:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your values
-   ```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-3. Place your Google service account JSON file somewhere and set the path in `.env`.
-
-4. Share your Google Sheet with the service account email (found in the JSON file as `client_email`).
+cp .env.example .env
+# Edit .env with your values
+```
 
 ## Usage
 
 ```bash
-./sync.sh
+./sync.py
+# or
+python3 sync.py
 ```
 
 ## Configuration (.env)
@@ -49,21 +45,16 @@ Bash script that syncs club member tournament results from [iDiscGolf](https://w
 |---|---|---|
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Path to service account JSON file | (required) |
 | `GOOGLE_SHEET_ID` | Google Sheet ID (from the URL) | (required) |
-| `MEMBERS_TAB` | Tab name containing club members | `Members` |
-| `RESULTS_TAB` | Tab name for tournament results | `Results` |
+| `IDISCGOLF_API_TOKEN` | iDiscGolf API access token | (required) |
 | `SYNC_THRESHOLD_DAYS` | Days to look back beyond last sync | `7` |
-| `IDISCGOLF_BASE_URL` | iDiscGolf base URL | `https://www.idiscgolf.eu` |
+| `DATE_MARGIN_DAYS` | Extra days margin on window edges | `3` |
+| `IDISCGOLF_BASE_URL` | iDiscGolf base URL | `https://idiscgolf.cz` |
 
-## Project Structure
+## Sheet structure
 
-```
-.
-├── sync.sh              # Main entry point
-├── .env.example         # Configuration template
-├── lib/
-│   ├── google_auth.sh   # JWT auth for Google service account
-│   ├── google_sheets.sh # Google Sheets API v4 helpers
-│   ├── idiscgolf.sh     # iDiscGolf scraping (TODO)
-│   └── utils.sh         # Logging, date math, dependencies
-└── README.md
-```
+| Tab | Purpose |
+|---|---|
+| **Sledovaní hráči** | Club members: `#iDG ID`, `Jméno` |
+| **Sledované ligy** | Tracked leagues: `#iDG Liga ID`, `Liga` |
+| **Účast** | Results output (auto-populated by sync) |
+| **Nastavení** | Last sync timestamp |
