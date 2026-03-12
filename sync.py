@@ -17,7 +17,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -285,25 +285,55 @@ def main():
             log(f'    {len(results)} results, {matched} club member(s) matched.')
             time.sleep(0.2)
 
-    # Sort by date desc, then player name
-    all_results.sort(key=lambda r: (r['date'], r['player_name']), reverse=True)
-    log(f'Total results: {len(all_results)}')
+    log(f'New results fetched: {len(all_results)}')
 
-    # Write to sheet
-    if all_results:
-        header = [
-            '#iDG Hráč ID', 'Hráč', '#iDG Turnaj ID', 'Turnaj',
-            'Finalizované skore', 'Liga', 'Divize', 'Umístění',
-            'Datum', 'Týden', 'Poznámka',
+    # Deduplication: merge new results with existing sheet data.
+    # Key: (player_id, tournament_id) — a player has one result per tournament.
+    # New data wins over old (placement may have been updated).
+
+    HEADER = [
+        '#iDG Hráč ID', 'Hráč', '#iDG Turnaj ID', 'Turnaj',
+        'Finalizované skore', 'Liga', 'Divize', 'Umístění',
+        'Datum', 'Týden', 'Poznámka',
+    ]
+    COL_PLAYER_ID = 0
+    COL_TOURNAMENT_ID = 2
+
+    # Read existing rows from sheet
+    log(f'Reading existing data from {TAB_UCAST}...')
+    existing_rows = sheets_read(creds, sheet_id, f'{TAB_UCAST}!A1:K5000')
+    existing_data = existing_rows[1:] if len(existing_rows) > 1 else []  # skip header
+    log(f'Existing rows: {len(existing_data)}')
+
+    # Build map of existing rows keyed by (player_id, tournament_id)
+    existing_map: dict[tuple[str, str], list[str]] = {}
+    for row in existing_data:
+        if len(row) >= 3:
+            key = (row[COL_PLAYER_ID], row[COL_TOURNAMENT_ID])
+            existing_map[key] = row
+
+    # Add new results (overwriting existing entries with same key)
+    new_count = 0
+    updated_count = 0
+    for r in all_results:
+        key = (r['player_id'], r['tournament_id'])
+        row = [
+            r['player_id'], r['player_name'], r['tournament_id'],
+            r['tournament_name'], r['finalized'], r['league_name'],
+            r['division'], r['placement'], r['date'], r['week'], '',
         ]
-        rows = [header] + [
-            [
-                r['player_id'], r['player_name'], r['tournament_id'],
-                r['tournament_name'], r['finalized'], r['league_name'],
-                r['division'], r['placement'], r['date'], r['week'], '',
-            ]
-            for r in all_results
-        ]
+        if key in existing_map:
+            updated_count += 1
+        else:
+            new_count += 1
+        existing_map[key] = row
+
+    # Sort all rows by date desc, then player name
+    all_rows = sorted(existing_map.values(), key=lambda r: (r[8] if len(r) > 8 else '', r[1] if len(r) > 1 else ''), reverse=True)
+    log(f'After merge: {len(all_rows)} total ({new_count} new, {updated_count} updated)')
+
+    if all_rows:
+        rows = [HEADER] + all_rows
 
         log(f'Clearing {TAB_UCAST}...')
         sheets_clear(creds, sheet_id, f'{TAB_UCAST}!A1:K5000')
@@ -312,10 +342,10 @@ def main():
         sheets_write(creds, sheet_id, f'{TAB_UCAST}!A1:K{len(rows)}', rows)
         log('Results written.')
     else:
-        log('No matching results found.')
+        log('No results to write.')
 
     # Update sync timestamp
-    now = datetime.now(tz=timedelta(0)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    now = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     sheets_write(creds, sheet_id, f'{TAB_NASTAVENI}!A1:A2', [['Naposledy synchronizováno'], [now]])
     log(f'Sync complete. {len(all_results)} results written.')
 
