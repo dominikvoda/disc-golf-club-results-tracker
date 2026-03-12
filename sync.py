@@ -277,7 +277,7 @@ def main():
                             'finalized': 'Ano',
                             'league_name': league_name,
                             'division': div,
-                            'placement': f'{entry["rank"]}. z {entry["total_players"]}',
+                            'placement': str(entry['rank']),
                             'date': iso_date,
                             'week': week,
                         })
