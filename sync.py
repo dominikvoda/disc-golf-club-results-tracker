@@ -221,8 +221,13 @@ def main():
 
     # Read leagues
     log('Reading tracked leagues...')
-    ligy_rows = sheets_read(creds, sheet_id, f'{TAB_LIGY}!A1:B100')
-    leagues = {row[0]: row[1] for row in ligy_rows[1:] if len(row) >= 2}
+    ligy_rows = sheets_read(creds, sheet_id, f'{TAB_LIGY}!A1:C100')
+    # leagues: {id: (name, top_x)}
+    leagues = {}
+    for row in ligy_rows[1:]:
+        if len(row) >= 2:
+            top_x = int(row[2]) if len(row) >= 3 and row[2].isdigit() else None
+            leagues[row[0]] = (row[1], top_x)
     log(f'Found {len(leagues)} tracked leagues.')
 
     # Read members
@@ -234,8 +239,8 @@ def main():
     # Process each league
     all_results = []
 
-    for league_id, league_name in leagues.items():
-        log(f'League {league_id}: {league_name}')
+    for league_id, (league_name, top_x) in leagues.items():
+        log(f'League {league_id}: {league_name} (Top {top_x})' if top_x else f'League {league_id}: {league_name}')
 
         tournaments = scrape_league_tournaments(cfg['base_url'], league_id)
         in_window = [t for t in tournaments if from_date_m <= t['date'] <= to_date_m]
@@ -267,20 +272,23 @@ def main():
 
             for div, entries in divisions.items():
                 for entry in entries:
-                    if entry['player_id'] in members:
-                        matched += 1
-                        all_results.append({
-                            'player_id': entry['player_id'],
-                            'player_name': members[entry['player_id']],
-                            'tournament_id': t['id'],
-                            'tournament_name': t['name'],
-                            'finalized': 'Ano',
-                            'league_name': league_name,
-                            'division': div,
-                            'placement': str(entry['rank']),
-                            'date': iso_date,
-                            'week': week,
-                        })
+                    if entry['player_id'] not in members:
+                        continue
+                    if top_x is not None and entry['rank'] > top_x:
+                        continue
+                    matched += 1
+                    all_results.append({
+                        'player_id': entry['player_id'],
+                        'player_name': members[entry['player_id']],
+                        'tournament_id': t['id'],
+                        'tournament_name': t['name'],
+                        'finalized': 'Ano',
+                        'league_name': league_name,
+                        'division': div,
+                        'placement': str(entry['rank']),
+                        'date': iso_date,
+                        'week': week,
+                    })
 
             log(f'    {len(results)} results, {matched} club member(s) matched.')
             time.sleep(0.2)
@@ -305,14 +313,26 @@ def main():
     existing_data = existing_rows[1:] if len(existing_rows) > 1 else []  # skip header
     log(f'Existing rows: {len(existing_data)}')
 
-    # Build map of existing rows keyed by (player_id, tournament_id)
+    # Collect tournament IDs that were processed in this sync run.
+    # For these tournaments, we trust the new results completely
+    # (old rows for these tournaments are replaced, not merged).
+    processed_tournament_ids = {r['tournament_id'] for r in all_results}
+
+    # Build map of existing rows, excluding rows from re-processed tournaments
     existing_map: dict[tuple[str, str], list[str]] = {}
+    removed_count = 0
     for row in existing_data:
         if len(row) >= 3:
             key = (row[COL_PLAYER_ID], row[COL_TOURNAMENT_ID])
+            if row[COL_TOURNAMENT_ID] in processed_tournament_ids:
+                removed_count += 1
+                continue
             existing_map[key] = row
 
-    # Add new results (overwriting existing entries with same key)
+    if removed_count:
+        log(f'Removed {removed_count} old rows for re-processed tournaments.')
+
+    # Add new results
     new_count = 0
     updated_count = 0
     for r in all_results:
