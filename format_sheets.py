@@ -74,16 +74,12 @@ def format_reports(creds, sheet_id):
     sid = REPORTS_SHEET_ID
     umisteni_col = 7  # Column H (0-indexed)
 
-    requests_list = [
-        # Clear existing conditional format rules for this sheet
-        {'deleteConditionalFormatRule': {'sheetId': sid, 'index': 0}},
-    ]
-
-    # Try to clear existing rules (ignore errors if none exist)
-    try:
-        batch_update(creds, sheet_id, requests_list)
-    except Exception:
-        pass
+    # Clear all existing conditional format rules
+    for i in range(10, -1, -1):
+        try:
+            batch_update(creds, sheet_id, [{'deleteConditionalFormatRule': {'sheetId': sid, 'index': i}}])
+        except Exception:
+            pass
 
     requests_list = []
 
@@ -115,7 +111,7 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
@@ -132,7 +128,7 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
@@ -149,7 +145,7 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
@@ -162,12 +158,48 @@ def format_reports(creds, sheet_id):
         }
     })
 
+    # --- Alternating background per tournament group ---
+    # Uses COUNTUNIQUE on Tournament ID column (C) to alternate colors
+    requests_list.append({
+        'addConditionalFormatRule': {
+            'rule': {
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'booleanRule': {
+                    'condition': {
+                        'type': 'CUSTOM_FORMULA',
+                        'values': [{'userEnteredValue': '=ISEVEN(COUNTUNIQUE($C$2:$C2))'}],
+                    },
+                    'format': {'backgroundColor': LIGHT_GRAY_BG},
+                },
+            },
+            'index': 3,
+        }
+    })
+
     # --- Auto-resize columns ---
     requests_list.append({
         'autoResizeDimensions': {
             'dimensions': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 12},
         }
     })
+
+    # --- Bold borders between tournament groups ---
+    # Read report data to find where tournament ID (column C) changes
+    url = f'{SHEETS_API}/{sheet_id}/values/Reports!C2:C5000'
+    resp = http.get(url, headers={'Authorization': f'Bearer {creds.token}'})
+    tournament_ids = [row[0] if row else '' for row in resp.json().get('values', [])]
+
+    border_style = {'style': 'SOLID_MEDIUM', 'color': {'red': 0.4, 'green': 0.4, 'blue': 0.4}}
+    for i in range(1, len(tournament_ids)):
+        if tournament_ids[i] != tournament_ids[i - 1]:
+            # Add a top border on the row where tournament changes (i+1 because data starts at row 2)
+            row_idx = i + 1
+            requests_list.append({
+                'updateBorders': {
+                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+                    'top': border_style,
+                }
+            })
 
     batch_update(creds, sheet_id, requests_list)
     print('Reports tab formatted.')
@@ -182,20 +214,58 @@ def format_settings(creds, sheet_id):
     resp = http.get(url, headers={'Authorization': f'Bearer {creds.token}'})
     rows = resp.json().get('values', [])
 
-    section_rows = []      # "Nastavení", "Sledované ligy", "Extra hráči"
-    subheader_rows = []    # "#iDG Liga ID", "#iDG ID"
-    kv_rows = []           # key-value rows (Klub ID, Výchozí Top X, etc.)
+    ALL_SECTIONS = ('Nápověda', 'Nastavení', 'Sledované ligy', 'Extra hráči')
 
+    section_rows = []
+    subheader_rows = []
+    help_rows = []
+    kv_rows = []
+
+    current_section = None
     for i, row in enumerate(rows):
         cell0 = row[0].strip() if row else ''
-        if cell0 in ('Nastavení', 'Sledované ligy', 'Extra hráči'):
+        if cell0 in ALL_SECTIONS:
             section_rows.append(i)
+            current_section = cell0
         elif cell0.startswith('#iDG'):
             subheader_rows.append(i)
-        elif cell0 and cell0 not in ('', ) and i not in section_rows:
+        elif cell0 and current_section == 'Nápověda':
+            help_rows.append(i)
+        elif cell0 and current_section in ('Nastavení',):
             kv_rows.append(i)
 
     requests_list = []
+
+    # --- Full reset: clear all formatting on Settings data area ---
+    requests_list.append({
+        'repeatCell': {
+            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 50, 'startColumnIndex': 0, 'endColumnIndex': 3},
+            'cell': {
+                'userEnteredFormat': {
+                    'backgroundColor': WHITE,
+                    'textFormat': {'bold': False, 'italic': False, 'fontSize': 10,
+                                   'foregroundColor': {'red': 0, 'green': 0, 'blue': 0}},
+                    'horizontalAlignment': 'LEFT',
+                }
+            },
+            'fields': 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
+        }
+    })
+    # Unmerge all cells
+    requests_list.append({
+        'unmergeCells': {
+            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 50, 'startColumnIndex': 0, 'endColumnIndex': 3},
+        }
+    })
+    # Reset borders
+    requests_list.append({
+        'updateBorders': {
+            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 50, 'startColumnIndex': 0, 'endColumnIndex': 3},
+            'top': {'style': 'NONE'}, 'bottom': {'style': 'NONE'},
+            'left': {'style': 'NONE'}, 'right': {'style': 'NONE'},
+            'innerHorizontal': {'style': 'NONE'}, 'innerVertical': {'style': 'NONE'},
+        }
+    })
 
     # --- Section headers (blue background, white bold text, merged across 3 cols) ---
     for row_idx in section_rows:
@@ -212,11 +282,30 @@ def format_settings(creds, sheet_id):
                 'fields': 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
             }
         })
-        # Merge section header cells
+
+    # --- Help rows (Nápověda section): italic key, normal description) ---
+    for row_idx in help_rows:
         requests_list.append({
-            'mergeCells': {
-                'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 3},
-                'mergeType': 'MERGE_ALL',
+            'repeatCell': {
+                'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 1},
+                'cell': {
+                    'userEnteredFormat': {
+                        'textFormat': {'bold': True, 'fontSize': 9},
+                    }
+                },
+                'fields': 'userEnteredFormat(textFormat)',
+            }
+        })
+        requests_list.append({
+            'repeatCell': {
+                'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 1, 'endColumnIndex': 3},
+                'cell': {
+                    'userEnteredFormat': {
+                        'textFormat': {'italic': True, 'fontSize': 9,
+                                       'foregroundColor': {'red': 0.4, 'green': 0.4, 'blue': 0.4}},
+                    }
+                },
+                'fields': 'userEnteredFormat(textFormat)',
             }
         })
 
@@ -237,32 +326,29 @@ def format_settings(creds, sheet_id):
 
     # --- Key-value settings rows: bold key in col A, light gray background ---
     for row_idx in kv_rows:
-        cell0 = rows[row_idx][0].strip() if rows[row_idx] else ''
-        # Only style the config key-value rows (Klub ID, Výchozí Top X, Poslední synchronizace)
-        if cell0 in ('Klub ID', 'Výchozí Top X', 'Poslední synchronizace'):
-            requests_list.append({
-                'repeatCell': {
-                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 1},
-                    'cell': {
-                        'userEnteredFormat': {
-                            'textFormat': {**bold_format()},
-                            'backgroundColor': LIGHT_GRAY_BG,
-                        }
-                    },
-                    'fields': 'userEnteredFormat(textFormat,backgroundColor)',
-                }
-            })
-            requests_list.append({
-                'repeatCell': {
-                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 1, 'endColumnIndex': 3},
-                    'cell': {
-                        'userEnteredFormat': {
-                            'backgroundColor': LIGHT_GRAY_BG,
-                        }
-                    },
-                    'fields': 'userEnteredFormat(backgroundColor)',
-                }
-            })
+        requests_list.append({
+            'repeatCell': {
+                'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 1},
+                'cell': {
+                    'userEnteredFormat': {
+                        'textFormat': {**bold_format()},
+                        'backgroundColor': LIGHT_GRAY_BG,
+                    }
+                },
+                'fields': 'userEnteredFormat(textFormat,backgroundColor)',
+            }
+        })
+        requests_list.append({
+            'repeatCell': {
+                'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 1, 'endColumnIndex': 3},
+                'cell': {
+                    'userEnteredFormat': {
+                        'backgroundColor': LIGHT_GRAY_BG,
+                    }
+                },
+                'fields': 'userEnteredFormat(backgroundColor)',
+            }
+        })
 
     # --- Column widths ---
     col_widths = {0: 200, 1: 400, 2: 80}

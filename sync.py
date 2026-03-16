@@ -65,6 +65,17 @@ def get_config():
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets'
 
+REPORTS_SHEET_ID = 236964464
+
+# Colors (RGB 0-1)
+GOLD = {'red': 1.0, 'green': 0.84, 'blue': 0.0}
+SILVER = {'red': 0.75, 'green': 0.75, 'blue': 0.75}
+BRONZE = {'red': 0.8, 'green': 0.5, 'blue': 0.2}
+HEADER_BG = {'red': 0.16, 'green': 0.16, 'blue': 0.16}
+HEADER_FG = {'red': 1.0, 'green': 1.0, 'blue': 1.0}
+LIGHT_GRAY_BG = {'red': 0.95, 'green': 0.95, 'blue': 0.95}
+WHITE = {'red': 1.0, 'green': 1.0, 'blue': 1.0}
+
 
 def get_sheets_credentials(service_account_json: str) -> Credentials:
     creds = Credentials.from_service_account_file(service_account_json, scopes=SCOPES)
@@ -91,6 +102,151 @@ def sheets_clear(creds: Credentials, sheet_id: str, range_: str):
     url = f'{SHEETS_API}/{sheet_id}/values/{http.utils.quote(range_)}:clear'
     resp = http.post(url, headers={'Authorization': f'Bearer {creds.token}'}, json={})
     resp.raise_for_status()
+
+
+def sheets_batch_update(creds: Credentials, sheet_id: str, requests_list: list):
+    url = f'{SHEETS_API}/{sheet_id}:batchUpdate'
+    resp = http.post(
+        url,
+        headers={'Authorization': f'Bearer {creds.token}'},
+        json={'requests': requests_list},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Reports formatting
+# ---------------------------------------------------------------------------
+
+def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
+    """Apply full formatting to the Reports tab. Resets everything first."""
+    sid = REPORTS_SHEET_ID
+    num_rows = len(all_rows) + 1  # +1 for header
+
+    # --- Full reset: clear conditional rules ---
+    for i in range(10, -1, -1):
+        try:
+            sheets_batch_update(creds, sheet_id, [{'deleteConditionalFormatRule': {'sheetId': sid, 'index': i}}])
+        except Exception:
+            pass
+
+    requests_list = []
+
+    # --- Reset all data cell formatting (backgrounds, borders) ---
+    requests_list.append({
+        'repeatCell': {
+            'range': {'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'cell': {
+                'userEnteredFormat': {
+                    'backgroundColor': WHITE,
+                    'textFormat': {'bold': False},
+                }
+            },
+            'fields': 'userEnteredFormat(backgroundColor,textFormat.bold)',
+        }
+    })
+    # Reset borders on all data rows
+    requests_list.append({
+        'updateBorders': {
+            'range': {'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'top': {'style': 'NONE'},
+            'bottom': {'style': 'NONE'},
+            'left': {'style': 'NONE'},
+            'right': {'style': 'NONE'},
+            'innerHorizontal': {'style': 'NONE'},
+            'innerVertical': {'style': 'NONE'},
+        }
+    })
+
+    # --- Header row formatting ---
+    requests_list.append({
+        'repeatCell': {
+            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'cell': {
+                'userEnteredFormat': {
+                    'backgroundColor': HEADER_BG,
+                    'textFormat': {'foregroundColor': HEADER_FG, 'bold': True, 'fontSize': 10},
+                    'horizontalAlignment': 'CENTER',
+                }
+            },
+            'fields': 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
+        }
+    })
+
+    # --- Freeze header row ---
+    requests_list.append({
+        'updateSheetProperties': {
+            'properties': {'sheetId': sid, 'gridProperties': {'frozenRowCount': 1}},
+            'fields': 'gridProperties.frozenRowCount',
+        }
+    })
+
+    # --- Conditional formatting: gold/silver/bronze on Umístění column (H) ---
+    for idx, (value, color, bold) in enumerate([
+        (1, GOLD, True),
+        (2, SILVER, False),
+        (3, BRONZE, False),
+    ]):
+        fmt = {'backgroundColor': color}
+        if bold:
+            fmt['textFormat'] = {'bold': True}
+        requests_list.append({
+            'addConditionalFormatRule': {
+                'rule': {
+                    'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
+                    'booleanRule': {
+                        'condition': {
+                            'type': 'CUSTOM_FORMULA',
+                            'values': [{'userEnteredValue': f'=$H2={value}'}],
+                        },
+                        'format': fmt,
+                    },
+                },
+                'index': idx,
+            }
+        })
+
+    # --- Alternating background per tournament group ---
+    requests_list.append({
+        'addConditionalFormatRule': {
+            'rule': {
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'booleanRule': {
+                    'condition': {
+                        'type': 'CUSTOM_FORMULA',
+                        'values': [{'userEnteredValue': '=ISEVEN(COUNTUNIQUE($C$2:$C2))'}],
+                    },
+                    'format': {'backgroundColor': LIGHT_GRAY_BG},
+                },
+            },
+            'index': 3,
+        }
+    })
+
+    # --- Auto-resize columns ---
+    requests_list.append({
+        'autoResizeDimensions': {
+            'dimensions': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 12},
+        }
+    })
+
+    # --- Bold borders between tournament groups ---
+    border_style = {'style': 'SOLID_MEDIUM', 'color': {'red': 0.4, 'green': 0.4, 'blue': 0.4}}
+    prev_tid = None
+    for i, row in enumerate(all_rows):
+        tid = row[2] if len(row) > 2 else ''
+        if prev_tid is not None and tid != prev_tid:
+            row_idx = i + 1  # +1 for header
+            requests_list.append({
+                'updateBorders': {
+                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+                    'top': border_style,
+                }
+            })
+        prev_tid = tid
+
+    sheets_batch_update(creds, sheet_id, requests_list)
 
 
 # ---------------------------------------------------------------------------
@@ -352,11 +508,13 @@ def main():
 
     # Process each tournament
     all_results = []
+    all_processed_tournament_ids = set()
 
     for t in in_window:
         if t['date'] > today:
             continue
 
+        all_processed_tournament_ids.add(t['id'])
         league_info = tournament_league_map.get(t['id'])
         league_name = league_info[0] if league_info else ''
         top_x = league_info[1] if league_info else default_top_x
@@ -426,13 +584,11 @@ def main():
     existing_data = existing_rows[1:] if len(existing_rows) > 1 else []
     log(f'Existing rows: {len(existing_data)}')
 
-    processed_tournament_ids = {r['tournament_id'] for r in all_results}
-
     existing_map: dict[tuple[str, str], list[str]] = {}
     removed_count = 0
     for row in existing_data:
         if len(row) >= 3:
-            if row[COL_TOURNAMENT_ID] in processed_tournament_ids:
+            if row[COL_TOURNAMENT_ID] in all_processed_tournament_ids:
                 removed_count += 1
                 continue
             key = (row[COL_PLAYER_ID], row[COL_TOURNAMENT_ID])
@@ -459,7 +615,7 @@ def main():
 
     all_rows = sorted(
         existing_map.values(),
-        key=lambda r: (r[8] if len(r) > 8 else '', r[1] if len(r) > 1 else ''),
+        key=lambda r: (r[8] if len(r) > 8 else '', r[2] if len(r) > 2 else '', r[1] if len(r) > 1 else ''),
         reverse=True,
     )
     log(f'After merge: {len(all_rows)} total ({new_count} new, {updated_count} updated)')
@@ -473,6 +629,10 @@ def main():
         log(f'Writing {len(rows)} rows to {TAB_UCAST}...')
         sheets_write(creds, sheet_id, f'{TAB_UCAST}!A1:L{len(rows)}', rows)
         log('Results written.')
+
+        log('Applying Reports formatting...')
+        format_reports(creds, sheet_id, all_rows)
+        log('Reports formatted.')
     else:
         log('No results to write.')
 
