@@ -5,12 +5,13 @@ Disc Golf Club Results Tracker
 Syncs club member tournament results from iDiscGolf into a Google Sheet.
 
 Flow:
-1. Read tracked leagues (for Top X thresholds), members, and last sync date
-2. Build league -> tournament mapping by scraping league pages
-3. Scrape the main tournaments page for all tournaments in the time window
-4. For each past tournament, call iDiscGolf API for results
-5. Match results against club members, apply Top X filter if in a tracked league
-6. Write results to the sheet
+1. Read settings (club ID, leagues, extra players, last sync) from Settings tab
+2. Fetch club members from iDiscGolf club page + extra players from settings
+3. Build league -> tournament mapping by scraping league pages
+4. Scrape the main tournaments page for all tournaments in the time window
+5. For each past tournament, call iDiscGolf API for results
+6. Match results against club members, apply Top X filter
+7. Write results to the Účast tab
 """
 
 import os
@@ -20,7 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import requests
+import requests as http
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 
@@ -29,14 +30,11 @@ from google.oauth2.service_account import Credentials
 # ---------------------------------------------------------------------------
 
 def load_env(path: Path):
-    """Load .env file into os.environ (simple key=value parser)."""
     if not path.exists():
         return
     for line in path.read_text().splitlines():
         line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        if '=' not in line:
+        if not line or line.startswith('#') or '=' not in line:
             continue
         key, _, value = line.partition('=')
         value = value.strip().strip('"').strip("'")
@@ -54,7 +52,6 @@ def get_config():
     return {
         'service_account_json': sa_path,
         'sheet_id': os.environ['GOOGLE_SHEET_ID'],
-        'sync_threshold_days': int(os.environ.get('SYNC_THRESHOLD_DAYS', '7')),
         'base_url': os.environ.get('IDISCGOLF_BASE_URL', 'https://idiscgolf.cz'),
         'api_token': os.environ['IDISCGOLF_API_TOKEN'],
         'date_margin_days': int(os.environ.get('DATE_MARGIN_DAYS', '3')),
@@ -76,39 +73,131 @@ def get_sheets_credentials(service_account_json: str) -> Credentials:
 
 
 def sheets_read(creds: Credentials, sheet_id: str, range_: str) -> list[list[str]]:
-    url = f'{SHEETS_API}/{sheet_id}/values/{requests.utils.quote(range_)}'
-    resp = requests.get(url, headers={'Authorization': f'Bearer {creds.token}'})
+    url = f'{SHEETS_API}/{sheet_id}/values/{http.utils.quote(range_)}'
+    resp = http.get(url, headers={'Authorization': f'Bearer {creds.token}'})
     resp.raise_for_status()
     return resp.json().get('values', [])
 
 
 def sheets_write(creds: Credentials, sheet_id: str, range_: str, values: list[list]):
-    url = f'{SHEETS_API}/{sheet_id}/values/{requests.utils.quote(range_)}?valueInputOption=USER_ENTERED'
+    url = f'{SHEETS_API}/{sheet_id}/values/{http.utils.quote(range_)}?valueInputOption=USER_ENTERED'
     body = {'range': range_, 'majorDimension': 'ROWS', 'values': values}
-    resp = requests.put(url, headers={'Authorization': f'Bearer {creds.token}'}, json=body)
+    resp = http.put(url, headers={'Authorization': f'Bearer {creds.token}'}, json=body)
     resp.raise_for_status()
     return resp.json()
 
 
 def sheets_clear(creds: Credentials, sheet_id: str, range_: str):
-    url = f'{SHEETS_API}/{sheet_id}/values/{requests.utils.quote(range_)}:clear'
-    resp = requests.post(url, headers={'Authorization': f'Bearer {creds.token}'}, json={})
+    url = f'{SHEETS_API}/{sheet_id}/values/{http.utils.quote(range_)}:clear'
+    resp = http.post(url, headers={'Authorization': f'Bearer {creds.token}'}, json={})
     resp.raise_for_status()
+
+
+# ---------------------------------------------------------------------------
+# Settings parser
+# ---------------------------------------------------------------------------
+
+def parse_settings(rows: list[list[str]]) -> dict:
+    """
+    Parse the unified Settings tab.
+
+    Layout:
+      Nastavení
+      Klub ID              | 15
+      Výchozí Top X        | 3
+      Poslední synchronizace | <timestamp>
+      (empty)
+      Sledované ligy
+      #iDG Liga ID | Liga | Top X
+      ...
+      (empty)
+      Extra hráči
+      #iDG ID | Jméno
+      ...
+    """
+    settings = {
+        'club_id': '',
+        'default_top_x': 3,
+        'last_sync': '',
+        'leagues': {},       # league_id -> (name, top_x)
+        'extra_players': {}, # player_id -> name
+    }
+
+    section = None
+    for row in rows:
+        cell0 = row[0].strip() if row else ''
+
+        # Detect section headers
+        if cell0 == 'Nastavení':
+            section = 'settings'
+            continue
+        elif cell0 == 'Sledované ligy':
+            section = 'leagues'
+            continue
+        elif cell0 == 'Extra hráči':
+            section = 'extra'
+            continue
+        elif cell0 == '' and (len(row) < 2 or not row[1].strip()):
+            continue  # empty separator row
+
+        if section == 'settings':
+            val = row[1].strip() if len(row) > 1 else ''
+            if cell0 == 'Klub ID':
+                settings['club_id'] = val
+            elif cell0 == 'Výchozí Top X':
+                settings['default_top_x'] = int(val) if val.isdigit() else 3
+            elif cell0 == 'Poslední synchronizace':
+                settings['last_sync'] = val
+
+        elif section == 'leagues':
+            if cell0.startswith('#'):  # skip header row
+                continue
+            if cell0 and len(row) >= 2:
+                top_x = int(row[2]) if len(row) >= 3 and row[2].strip().isdigit() else None
+                settings['leagues'][cell0] = (row[1].strip(), top_x)
+
+        elif section == 'extra':
+            if cell0.startswith('#'):  # skip header row
+                continue
+            if cell0 and len(row) >= 2:
+                settings['extra_players'][cell0] = row[1].strip()
+
+    return settings
+
+
+def find_last_sync_row(rows: list[list[str]]) -> int:
+    """Find the row number (1-indexed) of the 'Poslední synchronizace' cell."""
+    for i, row in enumerate(rows):
+        if row and row[0].strip() == 'Poslední synchronizace':
+            return i + 1  # 1-indexed for Sheets API
+    return -1
 
 
 # ---------------------------------------------------------------------------
 # iDiscGolf
 # ---------------------------------------------------------------------------
 
+def fetch_club_members(base_url: str, club_id: str) -> dict[str, str]:
+    """Fetch all members from a club page. Returns {player_id: name}."""
+    resp = http.get(f'{base_url}/kluby/detail/{club_id}')
+    html = resp.text
+
+    members = {}
+    for match in re.finditer(
+        r"Hraci_lblJmeno_\d+\"><a href='/profil/(\d+)'>([^<]*)", html
+    ):
+        members[match.group(1)] = match.group(2).strip()
+
+    return members
+
+
 def scrape_league_tournament_ids(base_url: str, league_id: str) -> set[str]:
-    """Scrape a league page and return all tournament IDs belonging to it."""
-    resp = requests.get(f'{base_url}/ligy/{league_id}')
+    resp = http.get(f'{base_url}/ligy/{league_id}')
     return set(re.findall(r'/turnaje/(\d+)', resp.text))
 
 
 def scrape_all_tournaments(base_url: str) -> list[dict]:
-    """Scrape the main tournaments listing page."""
-    resp = requests.get(f'{base_url}/turnaje')
+    resp = http.get(f'{base_url}/turnaje')
     html = resp.text
 
     match = re.search(r'id="gvTurnaje".*?</table>', html, re.DOTALL)
@@ -145,8 +234,7 @@ def scrape_all_tournaments(base_url: str) -> list[dict]:
 
 
 def api_tournament_detail(base_url: str, api_token: str, tournament_id: str) -> dict:
-    """Fetch tournament details from the iDiscGolf API."""
-    resp = requests.get(
+    resp = http.get(
         f'{base_url}/api/v1/tournaments/detail',
         params={'tournamentId': tournament_id},
         headers={'X-Access-Token': api_token},
@@ -160,7 +248,6 @@ def api_tournament_detail(base_url: str, api_token: str, tournament_id: str) -> 
 # ---------------------------------------------------------------------------
 
 def compute_placements(api_results: list[dict]) -> dict[str, list[dict]]:
-    """Group results by division, sum scores, compute rankings."""
     divisions: dict[str, list[dict]] = {}
 
     for r in api_results:
@@ -188,10 +275,7 @@ def log(msg: str):
 # ---------------------------------------------------------------------------
 
 TAB_UCAST = 'Účast'
-TAB_HRACI = 'Sledovaní hráči'
-TAB_LIGY = 'Sledované ligy'
-TAB_NASTAVENI = 'Nastavení'
-NUM_COLUMNS = 12  # A through L
+TAB_SETTINGS = 'Settings'
 
 
 def main():
@@ -202,41 +286,55 @@ def main():
     sheet_id = cfg['sheet_id']
     log('Authentication successful.')
 
-    # Read last sync
-    settings = sheets_read(creds, sheet_id, f'{TAB_NASTAVENI}!A1:A2')
-    last_sync_str = settings[1][0] if len(settings) > 1 and settings[1] else ''
+    # Read and parse settings
+    log('Reading settings...')
+    settings_rows = sheets_read(creds, sheet_id, f'{TAB_SETTINGS}!A1:C100')
+    settings = parse_settings(settings_rows)
 
+    club_id = settings['club_id']
+    default_top_x = settings['default_top_x']
+    last_sync_str = settings['last_sync']
+    leagues = settings['leagues']
+    extra_players = settings['extra_players']
+
+    if not club_id:
+        log('ERROR: Klub ID not set in Settings tab.')
+        sys.exit(1)
+
+    log(f'Club ID: {club_id}, Default Top X: {default_top_x}, Leagues: {len(leagues)}, Extra players: {len(extra_players)}')
+
+    # Calculate time window
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    to_date = today
+    sync_threshold_days = int(os.environ.get('SYNC_THRESHOLD_DAYS', '7'))
 
     if last_sync_str:
         try:
             last_sync = datetime.fromisoformat(last_sync_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            from_date = last_sync - timedelta(days=cfg['sync_threshold_days'])
+            from_date = last_sync - timedelta(days=sync_threshold_days)
         except ValueError:
-            from_date = today - timedelta(days=cfg['sync_threshold_days'])
+            from_date = today - timedelta(days=sync_threshold_days)
         log(f'Last sync: {last_sync_str}')
     else:
-        from_date = today - timedelta(days=cfg['sync_threshold_days'])
+        from_date = today - timedelta(days=sync_threshold_days)
         log('No previous sync found.')
 
     margin = timedelta(days=cfg['date_margin_days'])
     from_date_m = from_date - margin
-    to_date_m = to_date + margin
+    to_date_m = today + margin
 
-    log(f'Looking up tournaments from {from_date.date()} to {to_date.date()} (±{cfg["date_margin_days"]}d margin)')
+    log(f'Time window: {from_date.date()} to {today.date()} (±{cfg["date_margin_days"]}d margin)')
 
-    # Read tracked leagues (for Top X thresholds)
-    log('Reading tracked leagues...')
-    ligy_rows = sheets_read(creds, sheet_id, f'{TAB_LIGY}!A1:C100')
-    leagues: dict[str, tuple[str, int | None]] = {}
-    for row in ligy_rows[1:]:
-        if len(row) >= 2:
-            top_x = int(row[2]) if len(row) >= 3 and row[2].isdigit() else None
-            leagues[row[0]] = (row[1], top_x)
-    log(f'Found {len(leagues)} tracked leagues.')
+    # Fetch club members
+    log(f'Fetching club members from iDiscGolf (club {club_id})...')
+    members = fetch_club_members(cfg['base_url'], club_id)
+    log(f'Found {len(members)} club members.')
 
-    # Build tournament_id -> (league_name, top_x) map from league pages
+    # Add extra players
+    if extra_players:
+        members.update(extra_players)
+        log(f'Added {len(extra_players)} extra player(s). Total: {len(members)}')
+
+    # Build league -> tournament mapping
     log('Building league-tournament mapping...')
     tournament_league_map: dict[str, tuple[str, int | None]] = {}
     for league_id, (league_name, top_x) in leagues.items():
@@ -246,33 +344,28 @@ def main():
         log(f'  {league_name}: {len(tids)} tournaments (Top {top_x})')
         time.sleep(0.2)
 
-    # Read members
-    log('Reading members...')
-    members_rows = sheets_read(creds, sheet_id, f'{TAB_HRACI}!A1:B1000')
-    members = {row[0]: row[1] for row in members_rows[1:] if len(row) >= 2}
-    log(f'Found {len(members)} members.')
-
     # Scrape main tournaments page
     log('Scraping tournaments listing...')
     all_tournaments = scrape_all_tournaments(cfg['base_url'])
     in_window = [t for t in all_tournaments if from_date_m <= t['date'] <= to_date_m]
-    log(f'Found {len(all_tournaments)} total tournaments, {len(in_window)} in time window.')
+    log(f'Found {len(all_tournaments)} total, {len(in_window)} in time window.')
 
-    # Process each tournament in window
+    # Process each tournament
     all_results = []
 
     for t in in_window:
         if t['date'] > today:
             continue
 
-        DEFAULT_TOP_X = 3
         league_info = tournament_league_map.get(t['id'])
         league_name = league_info[0] if league_info else ''
-        top_x = league_info[1] if league_info else DEFAULT_TOP_X
+        top_x = league_info[1] if league_info else default_top_x
 
         label = f'{t["name"]} (ID: {t["id"]}, {t["date"].date()})'
         if league_name:
             label += f' [{league_name}, Top {top_x}]'
+        else:
+            label += f' [Top {top_x}]'
 
         log(f'  API: {label}...')
 
@@ -285,7 +378,6 @@ def main():
         results = api_data.get('results', [])
         if not results:
             log('    No results (score not finalized).')
-            # TODO: lookup from another source
             continue
 
         divisions = compute_placements(results)
@@ -320,10 +412,7 @@ def main():
 
     log(f'New results fetched: {len(all_results)}')
 
-    # Deduplication: merge new results with existing sheet data.
-    # Key: (player_id, tournament_id) — a player has one result per tournament.
-    # For re-processed tournaments, new data replaces old completely.
-
+    # Deduplication
     HEADER = [
         '#iDG Hráč ID', 'Hráč', '#iDG Turnaj ID', 'Turnaj',
         'Finalizované skore', 'Liga', 'Divize', 'Umístění',
@@ -332,16 +421,13 @@ def main():
     COL_PLAYER_ID = 0
     COL_TOURNAMENT_ID = 2
 
-    # Read existing rows from sheet
     log(f'Reading existing data from {TAB_UCAST}...')
     existing_rows = sheets_read(creds, sheet_id, f'{TAB_UCAST}!A1:L5000')
     existing_data = existing_rows[1:] if len(existing_rows) > 1 else []
     log(f'Existing rows: {len(existing_data)}')
 
-    # Collect tournament IDs that were processed in this sync run.
     processed_tournament_ids = {r['tournament_id'] for r in all_results}
 
-    # Build map of existing rows, excluding rows from re-processed tournaments
     existing_map: dict[tuple[str, str], list[str]] = {}
     removed_count = 0
     for row in existing_data:
@@ -355,7 +441,6 @@ def main():
     if removed_count:
         log(f'Removed {removed_count} old rows for re-processed tournaments.')
 
-    # Add new results
     new_count = 0
     updated_count = 0
     for r in all_results:
@@ -372,7 +457,6 @@ def main():
             new_count += 1
         existing_map[key] = row
 
-    # Sort by date desc, then player name
     all_rows = sorted(
         existing_map.values(),
         key=lambda r: (r[8] if len(r) > 8 else '', r[1] if len(r) > 1 else ''),
@@ -392,9 +476,13 @@ def main():
     else:
         log('No results to write.')
 
-    # Update sync timestamp
-    now = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    sheets_write(creds, sheet_id, f'{TAB_NASTAVENI}!A1:A2', [['Naposledy synchronizováno'], [now]])
+    # Update last sync timestamp in Settings tab
+    sync_row = find_last_sync_row(settings_rows)
+    if sync_row > 0:
+        now = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        sheets_write(creds, sheet_id, f'{TAB_SETTINGS}!B{sync_row}', [[now]])
+        log(f'Last sync updated to {now}')
+
     log(f'Sync complete. {len(all_results)} results written.')
 
 
