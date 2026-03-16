@@ -274,7 +274,7 @@ def log(msg: str):
 # Main
 # ---------------------------------------------------------------------------
 
-TAB_UCAST = 'Účast'
+TAB_UCAST = 'Reports'
 TAB_SETTINGS = 'Settings'
 
 
