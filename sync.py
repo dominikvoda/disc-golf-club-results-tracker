@@ -5,14 +5,14 @@ Disc Golf Club Results Tracker
 Syncs club member tournament results from iDiscGolf into a Google Sheet.
 
 Flow:
-1. Read tracked leagues, members, and last sync date from the sheet
-2. Scrape each league page for tournaments within the time window
-3. For each past tournament, call iDiscGolf API for results
-4. Match results against club members, compute placements
-5. Write results to the sheet
+1. Read tracked leagues (for Top X thresholds), members, and last sync date
+2. Build league -> tournament mapping by scraping league pages
+3. Scrape the main tournaments page for all tournaments in the time window
+4. For each past tournament, call iDiscGolf API for results
+5. Match results against club members, apply Top X filter if in a tracked league
+6. Write results to the sheet
 """
 
-import json
 import os
 import re
 import sys
@@ -100,12 +100,18 @@ def sheets_clear(creds: Credentials, sheet_id: str, range_: str):
 # iDiscGolf
 # ---------------------------------------------------------------------------
 
-def scrape_league_tournaments(base_url: str, league_id: str) -> list[dict]:
-    """Scrape a league page for tournaments with dates."""
+def scrape_league_tournament_ids(base_url: str, league_id: str) -> set[str]:
+    """Scrape a league page and return all tournament IDs belonging to it."""
     resp = requests.get(f'{base_url}/ligy/{league_id}')
+    return set(re.findall(r'/turnaje/(\d+)', resp.text))
+
+
+def scrape_all_tournaments(base_url: str) -> list[dict]:
+    """Scrape the main tournaments listing page."""
+    resp = requests.get(f'{base_url}/turnaje')
     html = resp.text
 
-    match = re.search(r'id="gvTournaments".*?</table>', html, re.DOTALL)
+    match = re.search(r'id="gvTurnaje".*?</table>', html, re.DOTALL)
     if not match:
         return []
 
@@ -118,7 +124,7 @@ def scrape_league_tournaments(base_url: str, league_id: str) -> list[dict]:
             continue
 
         date_str = re.sub(r'<[^>]+>', '', cells[0]).strip()
-        name = re.sub(r'<[^>]+>', '', cells[3]).strip()
+        name = re.sub(r'<[^>]+>', '', cells[4]).strip()
 
         t_match = re.search(r'/turnaje/(\d+)', row)
         if not t_match:
@@ -185,6 +191,7 @@ TAB_UCAST = 'Účast'
 TAB_HRACI = 'Sledovaní hráči'
 TAB_LIGY = 'Sledované ligy'
 TAB_NASTAVENI = 'Nastavení'
+NUM_COLUMNS = 12  # A through L
 
 
 def main():
@@ -219,16 +226,25 @@ def main():
 
     log(f'Looking up tournaments from {from_date.date()} to {to_date.date()} (±{cfg["date_margin_days"]}d margin)')
 
-    # Read leagues
+    # Read tracked leagues (for Top X thresholds)
     log('Reading tracked leagues...')
     ligy_rows = sheets_read(creds, sheet_id, f'{TAB_LIGY}!A1:C100')
-    # leagues: {id: (name, top_x)}
-    leagues = {}
+    leagues: dict[str, tuple[str, int | None]] = {}
     for row in ligy_rows[1:]:
         if len(row) >= 2:
             top_x = int(row[2]) if len(row) >= 3 and row[2].isdigit() else None
             leagues[row[0]] = (row[1], top_x)
     log(f'Found {len(leagues)} tracked leagues.')
+
+    # Build tournament_id -> (league_name, top_x) map from league pages
+    log('Building league-tournament mapping...')
+    tournament_league_map: dict[str, tuple[str, int | None]] = {}
+    for league_id, (league_name, top_x) in leagues.items():
+        tids = scrape_league_tournament_ids(cfg['base_url'], league_id)
+        for tid in tids:
+            tournament_league_map[tid] = (league_name, top_x)
+        log(f'  {league_name}: {len(tids)} tournaments (Top {top_x})')
+        time.sleep(0.2)
 
     # Read members
     log('Reading members...')
@@ -236,86 +252,92 @@ def main():
     members = {row[0]: row[1] for row in members_rows[1:] if len(row) >= 2}
     log(f'Found {len(members)} members.')
 
-    # Process each league
+    # Scrape main tournaments page
+    log('Scraping tournaments listing...')
+    all_tournaments = scrape_all_tournaments(cfg['base_url'])
+    in_window = [t for t in all_tournaments if from_date_m <= t['date'] <= to_date_m]
+    log(f'Found {len(all_tournaments)} total tournaments, {len(in_window)} in time window.')
+
+    # Process each tournament in window
     all_results = []
 
-    for league_id, (league_name, top_x) in leagues.items():
-        log(f'League {league_id}: {league_name} (Top {top_x})' if top_x else f'League {league_id}: {league_name}')
+    for t in in_window:
+        if t['date'] > today:
+            continue
 
-        tournaments = scrape_league_tournaments(cfg['base_url'], league_id)
-        in_window = [t for t in tournaments if from_date_m <= t['date'] <= to_date_m]
-        log(f'  {len(in_window)} tournaments in time window.')
+        league_info = tournament_league_map.get(t['id'])
+        league_name = league_info[0] if league_info else ''
+        top_x = league_info[1] if league_info else None
 
-        for t in in_window:
-            if t['date'] > today:
-                log(f'  Skipping future: {t["name"]} ({t["date"].date()})')
-                continue
+        label = f'{t["name"]} (ID: {t["id"]}, {t["date"].date()})'
+        if league_name:
+            label += f' [{league_name}, Top {top_x}]'
 
-            log(f'  API: {t["name"]} (ID: {t["id"]}, {t["date"].date()})...')
+        log(f'  API: {label}...')
 
-            try:
-                api_data = api_tournament_detail(cfg['base_url'], cfg['api_token'], t['id'])
-            except Exception as e:
-                log(f'    API error: {e}')
-                continue
+        try:
+            api_data = api_tournament_detail(cfg['base_url'], cfg['api_token'], t['id'])
+        except Exception as e:
+            log(f'    API error: {e}')
+            continue
 
-            results = api_data.get('results', [])
-            if not results:
-                log('    No results (score not finalized).')
-                # TODO: lookup from another source
-                continue
+        results = api_data.get('results', [])
+        if not results:
+            log('    No results (score not finalized).')
+            # TODO: lookup from another source
+            continue
 
-            divisions = compute_placements(results)
-            iso_date = t['date'].strftime('%Y-%m-%d')
-            week = str(t['date'].isocalendar()[1])
-            matched = 0
+        divisions = compute_placements(results)
+        iso_date = t['date'].strftime('%Y-%m-%d')
+        week = str(t['date'].isocalendar()[1])
+        link = f'{cfg["base_url"]}/turnaje/{t["id"]}'
+        matched = 0
 
-            for div, entries in divisions.items():
-                for entry in entries:
-                    if entry['player_id'] not in members:
-                        continue
-                    if top_x is not None and entry['rank'] > top_x:
-                        continue
-                    matched += 1
-                    all_results.append({
-                        'player_id': entry['player_id'],
-                        'player_name': members[entry['player_id']],
-                        'tournament_id': t['id'],
-                        'tournament_name': t['name'],
-                        'finalized': 'Ano',
-                        'league_name': league_name,
-                        'division': div,
-                        'placement': str(entry['rank']),
-                        'date': iso_date,
-                        'week': week,
-                    })
+        for div, entries in divisions.items():
+            for entry in entries:
+                if entry['player_id'] not in members:
+                    continue
+                if top_x is not None and entry['rank'] > top_x:
+                    continue
+                matched += 1
+                all_results.append({
+                    'player_id': entry['player_id'],
+                    'player_name': members[entry['player_id']],
+                    'tournament_id': t['id'],
+                    'tournament_name': t['name'],
+                    'finalized': 'Ano',
+                    'league_name': league_name,
+                    'division': div,
+                    'placement': str(entry['rank']),
+                    'date': iso_date,
+                    'week': week,
+                    'link': link,
+                })
 
-            log(f'    {len(results)} results, {matched} club member(s) matched.')
-            time.sleep(0.2)
+        log(f'    {len(results)} results, {matched} club member(s) matched.')
+        time.sleep(0.2)
 
     log(f'New results fetched: {len(all_results)}')
 
     # Deduplication: merge new results with existing sheet data.
     # Key: (player_id, tournament_id) — a player has one result per tournament.
-    # New data wins over old (placement may have been updated).
+    # For re-processed tournaments, new data replaces old completely.
 
     HEADER = [
         '#iDG Hráč ID', 'Hráč', '#iDG Turnaj ID', 'Turnaj',
         'Finalizované skore', 'Liga', 'Divize', 'Umístění',
-        'Datum', 'Týden', 'Poznámka',
+        'Datum', 'Týden', 'Odkaz', 'Poznámka',
     ]
     COL_PLAYER_ID = 0
     COL_TOURNAMENT_ID = 2
 
     # Read existing rows from sheet
     log(f'Reading existing data from {TAB_UCAST}...')
-    existing_rows = sheets_read(creds, sheet_id, f'{TAB_UCAST}!A1:K5000')
-    existing_data = existing_rows[1:] if len(existing_rows) > 1 else []  # skip header
+    existing_rows = sheets_read(creds, sheet_id, f'{TAB_UCAST}!A1:L5000')
+    existing_data = existing_rows[1:] if len(existing_rows) > 1 else []
     log(f'Existing rows: {len(existing_data)}')
 
     # Collect tournament IDs that were processed in this sync run.
-    # For these tournaments, we trust the new results completely
-    # (old rows for these tournaments are replaced, not merged).
     processed_tournament_ids = {r['tournament_id'] for r in all_results}
 
     # Build map of existing rows, excluding rows from re-processed tournaments
@@ -323,10 +345,10 @@ def main():
     removed_count = 0
     for row in existing_data:
         if len(row) >= 3:
-            key = (row[COL_PLAYER_ID], row[COL_TOURNAMENT_ID])
             if row[COL_TOURNAMENT_ID] in processed_tournament_ids:
                 removed_count += 1
                 continue
+            key = (row[COL_PLAYER_ID], row[COL_TOURNAMENT_ID])
             existing_map[key] = row
 
     if removed_count:
@@ -340,7 +362,8 @@ def main():
         row = [
             r['player_id'], r['player_name'], r['tournament_id'],
             r['tournament_name'], r['finalized'], r['league_name'],
-            r['division'], r['placement'], r['date'], r['week'], '',
+            r['division'], r['placement'], r['date'], r['week'],
+            r['link'], '',
         ]
         if key in existing_map:
             updated_count += 1
@@ -348,18 +371,22 @@ def main():
             new_count += 1
         existing_map[key] = row
 
-    # Sort all rows by date desc, then player name
-    all_rows = sorted(existing_map.values(), key=lambda r: (r[8] if len(r) > 8 else '', r[1] if len(r) > 1 else ''), reverse=True)
+    # Sort by date desc, then player name
+    all_rows = sorted(
+        existing_map.values(),
+        key=lambda r: (r[8] if len(r) > 8 else '', r[1] if len(r) > 1 else ''),
+        reverse=True,
+    )
     log(f'After merge: {len(all_rows)} total ({new_count} new, {updated_count} updated)')
 
     if all_rows:
         rows = [HEADER] + all_rows
 
         log(f'Clearing {TAB_UCAST}...')
-        sheets_clear(creds, sheet_id, f'{TAB_UCAST}!A1:K5000')
+        sheets_clear(creds, sheet_id, f'{TAB_UCAST}!A1:L5000')
 
         log(f'Writing {len(rows)} rows to {TAB_UCAST}...')
-        sheets_write(creds, sheet_id, f'{TAB_UCAST}!A1:K{len(rows)}', rows)
+        sheets_write(creds, sheet_id, f'{TAB_UCAST}!A1:L{len(rows)}', rows)
         log('Results written.')
     else:
         log('No results to write.')
