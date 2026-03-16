@@ -265,9 +265,10 @@ def main():
         if t['date'] > today:
             continue
 
+        DEFAULT_TOP_X = 3
         league_info = tournament_league_map.get(t['id'])
         league_name = league_info[0] if league_info else ''
-        top_x = league_info[1] if league_info else None
+        top_x = league_info[1] if league_info else DEFAULT_TOP_X
 
         label = f'{t["name"]} (ID: {t["id"]}, {t["date"].date()})'
         if league_name:
