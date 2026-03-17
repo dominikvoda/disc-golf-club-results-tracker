@@ -136,7 +136,7 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
     # --- Reset all data cell formatting (backgrounds, borders) ---
     requests_list.append({
         'repeatCell': {
-            'range': {'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'range': {'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 11},
             'cell': {
                 'userEnteredFormat': {
                     'backgroundColor': WHITE,
@@ -149,7 +149,7 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
     # Reset borders on all data rows
     requests_list.append({
         'updateBorders': {
-            'range': {'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'range': {'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 11},
             'top': {'style': 'NONE'},
             'bottom': {'style': 'NONE'},
             'left': {'style': 'NONE'},
@@ -162,7 +162,7 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
     # --- Header row formatting ---
     requests_list.append({
         'repeatCell': {
-            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 11},
             'cell': {
                 'userEnteredFormat': {
                     'backgroundColor': HEADER_BG,
@@ -194,11 +194,11 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
         requests_list.append({
             'addConditionalFormatRule': {
                 'rule': {
-                    'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
+                    'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 8, 'endColumnIndex': 9}],
                     'booleanRule': {
                         'condition': {
                             'type': 'CUSTOM_FORMULA',
-                            'values': [{'userEnteredValue': f'=$H2={value}'}],
+                            'values': [{'userEnteredValue': f'=$I2={value}'}],
                         },
                         'format': fmt,
                     },
@@ -211,11 +211,11 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 11}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
-                        'values': [{'userEnteredValue': '=ISEVEN(COUNTUNIQUE($C$2:$C2))'}],
+                        'values': [{'userEnteredValue': '=ISEVEN(COUNTUNIQUE($D$2:$D2))'}],
                     },
                     'format': {'backgroundColor': LIGHT_GRAY_BG},
                 },
@@ -224,10 +224,20 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
         }
     })
 
+    # --- Hide ID columns (B=#iDG Hráč ID, D=#iDG Turnaj ID) ---
+    for col_idx in [1, 3]:
+        requests_list.append({
+            'updateDimensionProperties': {
+                'range': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': col_idx, 'endIndex': col_idx + 1},
+                'properties': {'hiddenByUser': True},
+                'fields': 'hiddenByUser',
+            }
+        })
+
     # --- Auto-resize columns ---
     requests_list.append({
         'autoResizeDimensions': {
-            'dimensions': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 12},
+            'dimensions': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 11},
         }
     })
 
@@ -235,12 +245,12 @@ def format_reports(creds: Credentials, sheet_id: str, all_rows: list[list]):
     border_style = {'style': 'SOLID_MEDIUM', 'color': {'red': 0.4, 'green': 0.4, 'blue': 0.4}}
     prev_tid = None
     for i, row in enumerate(all_rows):
-        tid = row[2] if len(row) > 2 else ''
+        tid = row[3] if len(row) > 3 else ''
         if prev_tid is not None and tid != prev_tid:
             row_idx = i + 1  # +1 for header
             requests_list.append({
                 'updateBorders': {
-                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 11},
                     'top': border_style,
                 }
             })
@@ -267,6 +277,10 @@ def parse_settings(rows: list[list[str]]) -> dict:
       #iDG Liga ID | Liga | Top X
       ...
       (empty)
+      Turnaje s vlastním Top X
+      #iDG Turnaj ID | Turnaj | Top X
+      ...
+      (empty)
       Extra hráči
       #iDG ID | Jméno
       ...
@@ -276,6 +290,7 @@ def parse_settings(rows: list[list[str]]) -> dict:
         'default_top_x': 3,
         'last_sync': '',
         'leagues': {},       # league_id -> (name, top_x)
+        'custom_tournaments': {},  # tournament_id -> (name, top_x)
         'extra_players': {}, # player_id -> name
     }
 
@@ -289,6 +304,9 @@ def parse_settings(rows: list[list[str]]) -> dict:
             continue
         elif cell0 == 'Sledované ligy':
             section = 'leagues'
+            continue
+        elif cell0 == 'Turnaje s vlastním Top X':
+            section = 'custom_tournaments'
             continue
         elif cell0 == 'Extra hráči':
             section = 'extra'
@@ -311,6 +329,12 @@ def parse_settings(rows: list[list[str]]) -> dict:
             if cell0 and len(row) >= 2:
                 top_x = int(row[2]) if len(row) >= 3 and row[2].strip().isdigit() else None
                 settings['leagues'][cell0] = (row[1].strip(), top_x)
+
+        elif section == 'custom_tournaments':
+            if cell0.startswith('#'):  # skip header row
+                continue
+            if cell0 and len(row) >= 3 and row[2].strip().isdigit():
+                settings['custom_tournaments'][cell0] = (row[1].strip(), int(row[2]))
 
         elif section == 'extra':
             if cell0.startswith('#'):  # skip header row
@@ -451,13 +475,14 @@ def main():
     default_top_x = settings['default_top_x']
     last_sync_str = settings['last_sync']
     leagues = settings['leagues']
+    custom_tournaments = settings['custom_tournaments']
     extra_players = settings['extra_players']
 
     if not club_id:
         log('ERROR: Klub ID not set in Settings tab.')
         sys.exit(1)
 
-    log(f'Club ID: {club_id}, Default Top X: {default_top_x}, Leagues: {len(leagues)}, Extra players: {len(extra_players)}')
+    log(f'Club ID: {club_id}, Default Top X: {default_top_x}, Leagues: {len(leagues)}, Custom tournaments: {len(custom_tournaments)}, Extra players: {len(extra_players)}')
 
     # Calculate time window
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -515,12 +540,23 @@ def main():
             continue
 
         all_processed_tournament_ids.add(t['id'])
+
+        # Priority: custom tournament Top X > league Top X > default Top X
+        custom_info = custom_tournaments.get(t['id'])
         league_info = tournament_league_map.get(t['id'])
         league_name = league_info[0] if league_info else ''
-        top_x = league_info[1] if league_info else default_top_x
+
+        if custom_info:
+            top_x = custom_info[1]
+        elif league_info:
+            top_x = league_info[1]
+        else:
+            top_x = default_top_x
 
         label = f'{t["name"]} (ID: {t["id"]}, {t["date"].date()})'
-        if league_name:
+        if custom_info:
+            label += f' [Custom Top {top_x}]'
+        elif league_name:
             label += f' [{league_name}, Top {top_x}]'
         else:
             label += f' [Top {top_x}]'
@@ -540,7 +576,6 @@ def main():
 
         divisions = compute_placements(results)
         iso_date = t['date'].strftime('%Y-%m-%d')
-        week = str(t['date'].isocalendar()[1])
         link = f'{cfg["base_url"]}/turnaje/{t["id"]}'
         matched = 0
 
@@ -552,6 +587,7 @@ def main():
                     continue
                 matched += 1
                 all_results.append({
+                    'date': iso_date,
                     'player_id': entry['player_id'],
                     'player_name': members[entry['player_id']],
                     'tournament_id': t['id'],
@@ -560,8 +596,6 @@ def main():
                     'league_name': league_name,
                     'division': div,
                     'placement': str(entry['rank']),
-                    'date': iso_date,
-                    'week': week,
                     'link': link,
                 })
 
@@ -572,15 +606,15 @@ def main():
 
     # Deduplication
     HEADER = [
-        '#iDG Hráč ID', 'Hráč', '#iDG Turnaj ID', 'Turnaj',
+        'Datum', '#iDG Hráč ID', 'Hráč', '#iDG Turnaj ID', 'Turnaj',
         'Finalizované skore', 'Liga', 'Divize', 'Umístění',
-        'Datum', 'Týden', 'Odkaz', 'Poznámka',
+        'Odkaz', 'Poznámka',
     ]
-    COL_PLAYER_ID = 0
-    COL_TOURNAMENT_ID = 2
+    COL_PLAYER_ID = 1
+    COL_TOURNAMENT_ID = 3
 
     log(f'Reading existing data from {TAB_UCAST}...')
-    existing_rows = sheets_read(creds, sheet_id, f'{TAB_UCAST}!A1:L5000')
+    existing_rows = sheets_read(creds, sheet_id, f'{TAB_UCAST}!A1:K5000')
     existing_data = existing_rows[1:] if len(existing_rows) > 1 else []
     log(f'Existing rows: {len(existing_data)}')
 
@@ -602,9 +636,9 @@ def main():
     for r in all_results:
         key = (r['player_id'], r['tournament_id'])
         row = [
-            r['player_id'], r['player_name'], r['tournament_id'],
+            r['date'], r['player_id'], r['player_name'], r['tournament_id'],
             r['tournament_name'], r['finalized'], r['league_name'],
-            r['division'], r['placement'], r['date'], r['week'],
+            r['division'], r['placement'],
             r['link'], '',
         ]
         if key in existing_map:
@@ -615,7 +649,7 @@ def main():
 
     all_rows = sorted(
         existing_map.values(),
-        key=lambda r: (r[8] if len(r) > 8 else '', r[2] if len(r) > 2 else '', r[1] if len(r) > 1 else ''),
+        key=lambda r: (r[0] if len(r) > 0 else '', r[3] if len(r) > 3 else '', r[2] if len(r) > 2 else ''),
         reverse=True,
     )
     log(f'After merge: {len(all_rows)} total ({new_count} new, {updated_count} updated)')
@@ -624,10 +658,10 @@ def main():
         rows = [HEADER] + all_rows
 
         log(f'Clearing {TAB_UCAST}...')
-        sheets_clear(creds, sheet_id, f'{TAB_UCAST}!A1:L5000')
+        sheets_clear(creds, sheet_id, f'{TAB_UCAST}!A1:K5000')
 
         log(f'Writing {len(rows)} rows to {TAB_UCAST}...')
-        sheets_write(creds, sheet_id, f'{TAB_UCAST}!A1:L{len(rows)}', rows)
+        sheets_write(creds, sheet_id, f'{TAB_UCAST}!A1:K{len(rows)}', rows)
         log('Results written.')
 
         log('Applying Reports formatting...')

@@ -72,7 +72,7 @@ def bold_format():
 def format_reports(creds, sheet_id):
     """Format the Reports tab with conditional colors and styled header."""
     sid = REPORTS_SHEET_ID
-    umisteni_col = 7  # Column H (0-indexed)
+    umisteni_col = 8  # Column I (0-indexed)
 
     # Clear all existing conditional format rules
     for i in range(10, -1, -1):
@@ -86,7 +86,7 @@ def format_reports(creds, sheet_id):
     # --- Header row formatting ---
     requests_list.append({
         'repeatCell': {
-            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+            'range': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 11},
             'cell': {
                 'userEnteredFormat': {
                     'backgroundColor': HEADER_BG,
@@ -111,11 +111,11 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 8, 'endColumnIndex': 9}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
-                        'values': [{'userEnteredValue': '=$H2=1'}],
+                        'values': [{'userEnteredValue': '=$I2=1'}],
                     },
                     'format': {'backgroundColor': GOLD, 'textFormat': bold_format()},
                 },
@@ -128,11 +128,11 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 8, 'endColumnIndex': 9}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
-                        'values': [{'userEnteredValue': '=$H2=2'}],
+                        'values': [{'userEnteredValue': '=$I2=2'}],
                     },
                     'format': {'backgroundColor': SILVER},
                 },
@@ -145,11 +145,11 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 7, 'endColumnIndex': 8}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 8, 'endColumnIndex': 9}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
-                        'values': [{'userEnteredValue': '=$H2=3'}],
+                        'values': [{'userEnteredValue': '=$I2=3'}],
                     },
                     'format': {'backgroundColor': BRONZE},
                 },
@@ -163,11 +163,11 @@ def format_reports(creds, sheet_id):
     requests_list.append({
         'addConditionalFormatRule': {
             'rule': {
-                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 12}],
+                'ranges': [{'sheetId': sid, 'startRowIndex': 1, 'endRowIndex': 1000, 'startColumnIndex': 0, 'endColumnIndex': 11}],
                 'booleanRule': {
                     'condition': {
                         'type': 'CUSTOM_FORMULA',
-                        'values': [{'userEnteredValue': '=ISEVEN(COUNTUNIQUE($C$2:$C2))'}],
+                        'values': [{'userEnteredValue': '=ISEVEN(COUNTUNIQUE($D$2:$D2))'}],
                     },
                     'format': {'backgroundColor': LIGHT_GRAY_BG},
                 },
@@ -176,16 +176,26 @@ def format_reports(creds, sheet_id):
         }
     })
 
+    # --- Hide ID columns (B=#iDG Hráč ID, D=#iDG Turnaj ID) ---
+    for col_idx in [1, 3]:
+        requests_list.append({
+            'updateDimensionProperties': {
+                'range': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': col_idx, 'endIndex': col_idx + 1},
+                'properties': {'hiddenByUser': True},
+                'fields': 'hiddenByUser',
+            }
+        })
+
     # --- Auto-resize columns ---
     requests_list.append({
         'autoResizeDimensions': {
-            'dimensions': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 12},
+            'dimensions': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 11},
         }
     })
 
     # --- Bold borders between tournament groups ---
     # Read report data to find where tournament ID (column C) changes
-    url = f'{SHEETS_API}/{sheet_id}/values/Reports!C2:C5000'
+    url = f'{SHEETS_API}/{sheet_id}/values/Reports!D2:D5000'
     resp = http.get(url, headers={'Authorization': f'Bearer {creds.token}'})
     tournament_ids = [row[0] if row else '' for row in resp.json().get('values', [])]
 
@@ -196,7 +206,7 @@ def format_reports(creds, sheet_id):
             row_idx = i + 1
             requests_list.append({
                 'updateBorders': {
-                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 12},
+                    'range': {'sheetId': sid, 'startRowIndex': row_idx, 'endRowIndex': row_idx + 1, 'startColumnIndex': 0, 'endColumnIndex': 11},
                     'top': border_style,
                 }
             })
@@ -214,7 +224,7 @@ def format_settings(creds, sheet_id):
     resp = http.get(url, headers={'Authorization': f'Bearer {creds.token}'})
     rows = resp.json().get('values', [])
 
-    ALL_SECTIONS = ('Nápověda', 'Nastavení', 'Sledované ligy', 'Extra hráči')
+    ALL_SECTIONS = ('Nápověda', 'Nastavení', 'Sledované ligy', 'Turnaje s vlastním Top X', 'Extra hráči')
 
     section_rows = []
     subheader_rows = []
